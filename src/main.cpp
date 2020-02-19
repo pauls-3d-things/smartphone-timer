@@ -65,6 +65,11 @@ void setup() {
 void loop() {
   buttonState = digitalRead(button);
 
+  if (WiFi.status() != WL_CONNECTED) {
+      // reconnect if connection lost
+      waitForWifi();
+  }
+
   // check if the pushbutton is pressed. If it is, the buttonState is HIGH:
   if (buttonState == HIGH) {
     if (start) {
