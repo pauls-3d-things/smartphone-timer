@@ -1,30 +1,39 @@
+
+// define ENABLE_WIFI 1  // remove to disable wifi functions
+// You will need this: https://github.com/pauls-3d-things/node-mini-iot-server
+
+#ifdef ENABLE_WIFI
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WiFi.h>
+#endif
 #include <U8g2lib.h>
 #include <Wire.h>
+
 #include "Arduino.h"
 #include "config.h"
 
+#define DISP_REFRESH_DELAY 1000 / 10
+#define CLICK_DELAY 250
+#define TIME_MIN_SECONDS 1
+#define TIME_MAX_SECONDS 5
+
 U8G2_SSD1306_128X32_UNIVISION_F_SW_I2C u8g2(U8G2_R0, D5, D4, D2);
-unsigned long timestamp_start = 0;
-unsigned long timestamp_diff = 0;
-int secs = 0;
-int mins = 0;
-int hours = 0;
-boolean start = true;
 
 const int button = D8;  // the number of the pushbutton pin
 
-// variables will change:
-int buttonState = 0;  // variable for reading the pushbutton status
+enum GameState { START, RUNNING, FINISHED };
+uint8_t gameState = START;
 
+#ifdef ENABLE_WIFI
 void waitForWifi() {
-  WiFi.hostname(HOSTNAME);
-  WiFi.mode(WIFI_STA);
-  do {
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    delay(4000);
-  } while (WiFi.status() != WL_CONNECTED);
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.hostname(HOSTNAME);
+    WiFi.mode(WIFI_STA);
+    do {
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      delay(4000);
+    } while (WiFi.status() != WL_CONNECTED);
+  }
 }
 
 void postData(String filename, String payload, boolean append, boolean tsprefix) {
@@ -39,12 +48,7 @@ void postData(String filename, String payload, boolean append, boolean tsprefix)
   // http.writeToStream(&Serial);
   http.end();
 }
-
-String twoDigits(int x) { return (x < 10 ? String("0") : String("")) + String(x); }
-
-const String format(int hours, int mins, int secs) {
-  return twoDigits(hours) + String(":") + twoDigits(mins) + String(":") + twoDigits(secs);
-}
+#endif
 
 void setup() {
   Serial.begin(115200);
@@ -59,45 +63,113 @@ void setup() {
   u8g2.drawStr(1, 10, "Connecting...");
   u8g2.sendBuffer();
 
+#ifdef ENABLE_WIFI
   waitForWifi();
+#endif
 }
 
 void loop() {
-  buttonState = digitalRead(button);
+  static unsigned long lastDisplayRefresh = 0;
+  static unsigned long lastClick = 0;
+  static unsigned long gameStart = 0;
+  static boolean highScoreSent = false;
+  static long nextDuration = 0;
+  static long timeDiff = 0;
 
-  if (WiFi.status() != WL_CONNECTED) {
-      // reconnect if connection lost
-      waitForWifi();
+  unsigned long delta;
+  unsigned long durationMillis;
+
+  if (nextDuration == 0) {
+    nextDuration = random(TIME_MIN_SECONDS, TIME_MAX_SECONDS + 1);
   }
 
-  // check if the pushbutton is pressed. If it is, the buttonState is HIGH:
-  if (buttonState == HIGH) {
-    if (start) {
-      timestamp_start = millis();
-      postData("phone.csv", "0", true, true);
-      postData("phone.csv", "1", true, true);
-      start = false;
-    }
+  int buttonState = digitalRead(button);  // button pressed = HIGH
 
-    timestamp_diff = millis() - timestamp_start;
-    secs = (int)(timestamp_diff / 1000) % 60;
-    mins = (int)((timestamp_diff / (1000 * 60)) % 60);
-    hours = (int)((timestamp_diff / (1000 * 60 * 60)) % 24);
-    Serial.println(format(hours, mins, secs));
-  } else {
-    if (!start) {
-      postData("phone.csv", "1", true, true);
-      postData("phone.csv", "0", true, true);
+  if (lastClick + CLICK_DELAY < millis() && buttonState == HIGH) {
+    switch (gameState) {
+      case START:
+        gameStart = millis();
+        gameState = RUNNING;
+        highScoreSent = false;
+        break;
+      case RUNNING:
+        delta = millis() - gameStart;
+        durationMillis = nextDuration * 1000;
+        if (delta > durationMillis) {
+          timeDiff = delta - durationMillis;
+        } else {
+          timeDiff = -1 * (durationMillis - delta);
+        }
+        Serial.println(timeDiff);
+        gameState = FINISHED;
+        break;
+      case FINISHED:
+        gameState = START;
+        nextDuration = random(TIME_MIN_SECONDS, TIME_MAX_SECONDS + 1);
+        break;
+      default:
+        break;
     }
-    start = true;
-    Serial.println("Low");
+    lastClick = millis();
   }
 
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_profont12_tf);
-  u8g2.drawStr(1, 10, "Smartphone Timer v1.0");
-  u8g2.setFont(u8g2_font_profont22_tf);
-  u8g2.drawStr(16, 27, (format(hours, mins, secs)).c_str());
-  u8g2.sendBuffer();
-  delay(1000);
+  if (lastDisplayRefresh + DISP_REFRESH_DELAY < millis() || gameState == FINISHED) {
+    u8g2.clearBuffer();
+    switch (gameState) {
+      case START:
+        u8g2.setFont(u8g2_font_profont12_tf);
+        u8g2.drawStr(1, 10, "TimeMaster v1.0");
+        u8g2.setFont(u8g2_font_profont22_tf);
+        u8g2.drawStr(16, 27, (String("Next: ") + String(nextDuration) + "s").c_str());
+        break;
+      case RUNNING:
+        u8g2.setFont(u8g2_font_profont12_tf);
+        u8g2.drawStr(1, 10, "Running ...");
+        break;
+      case FINISHED:
+        u8g2.setFont(u8g2_font_profont12_tf);
+        if (timeDiff == 0) {
+          u8g2.drawStr(1, 10, "You did it!!!");
+        } else if (abs(timeDiff) < 100) {
+          u8g2.drawStr(1, 10, "Almost!!");
+        } else if (abs(timeDiff) < 500) {
+          u8g2.drawStr(1, 10, "Close!!!");
+        } else if (abs(timeDiff) < 1000) {
+          u8g2.drawStr(1, 10, "Not bad...");
+        } else if (abs(timeDiff) > 10000) {
+          u8g2.drawStr(1, 10, "Time to practice......");
+        } else {
+          u8g2.drawStr(1, 10, "Better luck next time!...");
+        }
+
+        u8g2.setFont(u8g2_font_profont22_tf);
+        if (timeDiff == 0) {
+          u8g2.drawStr(16, 27, "TimeMaster!");
+        } else if (timeDiff < 0) {
+          u8g2.drawStr(16, 27, (String(timeDiff) +  "ms").c_str());
+        } else {
+          u8g2.drawStr(16, 27, (String("+") + String(timeDiff) + "ms").c_str());
+        }
+        break;
+      default:
+        break;
+    }
+
+    u8g2.sendBuffer();
+    lastDisplayRefresh = millis();
+  }
+
+  if (gameState == FINISHED && !highScoreSent) {
+#ifdef ENABLE_WIFI
+    waitForWifi();
+    postData("highScore.csv", String(timeDiff), true, true);
+    highScoreSent = true;
+#endif
+  }
+
+  if (gameState == FINISHED && millis() - lastClick < 2000) {
+    // allow us to hold the button at the end for a bit
+    delay(2000);
+  }
+  delay(1);
 }
